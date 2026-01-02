@@ -5,3 +5,4 @@ output/
 *.log
 .DS_Store
 test-documents/
+src/prompts/*

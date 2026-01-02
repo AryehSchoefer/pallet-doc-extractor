@@ -2,12 +2,14 @@
 import "dotenv/config";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { processDeliveryDocument } from "./lib/correlator.js";
+import { processDocumentGroup } from "./lib/document-grouper.js";
+import { extractDocumentGroup } from "./lib/extractor-v010.js";
 import {
 	saveAsJSON,
-	toLademittelmahnungFormat,
+	v010ToLademittelmahnungFormat,
 } from "./lib/output-generator.js";
-import { processPDF } from "./lib/pdf-processor.js";
+import { validateAndEnrich } from "./lib/post-processor.js";
+import type { V010ExtractionData } from "./types/index.js";
 
 function parseArgs(): { input: string; output: string } {
 	const args = process.argv.slice(2);
@@ -51,6 +53,7 @@ async function main(): Promise<void> {
 	}
 
 	const { input, output } = parseArgs();
+	const basename = path.basename(input, ".pdf");
 
 	const timestamp = Date.now();
 	const outputDir = path.join(path.dirname(output), String(timestamp));
@@ -58,75 +61,87 @@ async function main(): Promise<void> {
 
 	await fs.mkdir(outputDir, { recursive: true });
 
-	console.log(`\n=== Pallet Movement Extraction ===`);
+	console.log(`\n=== Pallet Movement Extraction (v0.10) ===`);
 	console.log(`Input:  ${input}`);
 	console.log(`Output: ${outputDir}/`);
 	console.log();
 
 	try {
-		console.log("Step 1: Converting PDF to images...");
-		const pdfResult = await processPDF(input);
-		console.log(`  Processed ${pdfResult.totalPages} pages`);
+		console.log("Step 1: Processing PDF and grouping pages...");
+		const group = await processDocumentGroup(basename, [input]);
+		console.log(`  Processed ${group.pages.length} pages`);
 
-		console.log("\nStep 2: Classifying and extracting data...");
-		const extraction = await processDeliveryDocument(
-			pdfResult.pages,
-			path.basename(input),
-		);
+		console.log("\nStep 2: Extracting data (single-pass)...");
+		const result = await extractDocumentGroup(group);
 
-		console.log("\nStep 3: Converting to Lademittelmahnung format...");
-		const lademittelmahnung = toLademittelmahnungFormat(extraction);
-
-		if (!lademittelmahnung) {
-			console.warn(
-				"Warning: Could not generate Lademittelmahnung output (no valid stops found)",
-			);
+		if (!result.success) {
+			throw new Error(result.error || "Extraction failed");
 		}
 
-		console.log("\nStep 4: Saving results...");
+		console.log("\nStep 3: Validating and enriching...");
+		const enriched = validateAndEnrich(result);
+
+		const extractions = Array.isArray(enriched.data)
+			? enriched.data
+			: [enriched.data];
+		const validExtractions = extractions.filter(
+			(e): e is V010ExtractionData => e !== undefined,
+		);
+
+		console.log("\nStep 4: Converting to Lademittelmahnung format...");
+		const lademittelmahnungResults = validExtractions.map(
+			v010ToLademittelmahnungFormat,
+		);
+
+		console.log("\nStep 5: Saving results...");
 
 		const extractionPath = outputFile.replace(".json", "_extraction.json");
-		await saveAsJSON(extraction, extractionPath);
+		await saveAsJSON(validExtractions, extractionPath);
 
-		if (lademittelmahnung) {
-			await saveAsJSON(lademittelmahnung, outputFile);
+		if (lademittelmahnungResults.length > 0) {
+			await saveAsJSON(lademittelmahnungResults, outputFile);
 		}
 
 		const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 		console.log(`\n=== Extraction Complete ===`);
 		console.log(`Duration: ${duration}s`);
-		console.log(`Pages processed: ${extraction.processedPages.length}`);
-		console.log(`Stops found: ${extraction.stops.length}`);
-		console.log(
-			`Confidence: ${(extraction.extractionConfidence * 100).toFixed(1)}%`,
-		);
+		console.log(`Extractions: ${validExtractions.length}`);
 
-		if (extraction.warnings.length > 0) {
-			console.log(`\nWarnings (${extraction.warnings.length}):`);
-			for (const warning of extraction.warnings.slice(0, 5)) {
-				console.log(`  - ${warning}`);
-			}
-			if (extraction.warnings.length > 5) {
-				console.log(`  ... and ${extraction.warnings.length - 5} more`);
-			}
+		if (enriched.needsReview) {
+			console.log(
+				`\nNOTE: Results flagged for manual review (low confidence or issues detected)`,
+			);
 		}
 
-		if (lademittelmahnung) {
-			console.log(`\nPallet Movements:`);
-			for (const movement of lademittelmahnung.palletMovements) {
-				console.log(
-					`  ${movement.palletType}: Pickup +${movement.pickupReceived}/-${movement.pickupGiven} | Delivery +${movement.deliveryReceived}/-${movement.deliveryGiven} | Saldo: ${movement.saldo}`,
-				);
+		for (const extraction of validExtractions) {
+			console.log(
+				`\nDocument: ${extraction.documentType} (${extraction.locationType})`,
+			);
+			console.log(`  Location: ${extraction.location.name || "Unknown"}`);
+			console.log(`  Date: ${extraction.date || "Unknown"}`);
+			console.log(`  Confidence: ${(extraction.confidence * 100).toFixed(1)}%`);
+
+			if (extraction.palletsGiven.length > 0) {
+				console.log(`  Pallets Given:`);
+				for (const m of extraction.palletsGiven) {
+					console.log(`    ${m.type}: ${m.qty}`);
+				}
 			}
+
+			if (extraction.palletsReceived.length > 0) {
+				console.log(`  Pallets Received:`);
+				for (const m of extraction.palletsReceived) {
+					console.log(`    ${m.type}: ${m.qty}`);
+				}
+			}
+
+			console.log(`  Exchanged: ${extraction.exchanged ?? "Unknown"}`);
+			console.log(`  Saldo: ${extraction.saldo ?? "N/A"}`);
 		}
 
 		console.log(`\nRaw extraction saved to: ${extractionPath}`);
-		if (lademittelmahnung) {
+		if (lademittelmahnungResults.length > 0) {
 			console.log(`Condensed results saved to: ${outputFile}`);
-		} else {
-			console.log(
-				`Note: Condensed results file was NOT created (no valid stops found)`,
-			);
 		}
 	} catch (error) {
 		console.error("\nError during extraction:", error);

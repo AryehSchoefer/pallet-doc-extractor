@@ -9,7 +9,8 @@ const openrouter = createOpenRouter({
 // const model: LanguageModel = openrouter("google/gemini-2.0-flash-001");
 // const model: LanguageModel = openrouter("google/gemini-3-flash-preview");
 // const model: LanguageModel = openrouter("google/gemini-3-pro-preview");
-const model: LanguageModel = openrouter("google/gemini-2.5-pro");
+// const model: LanguageModel = openrouter("google/gemini-2.5-pro");
+const model: LanguageModel = openrouter("anthropic/claude-opus-4.5");
 // const model: LanguageModel = openrouter("z-ai/glm-4.6v");
 // const model: LanguageModel = openrouter("openai/gpt-5.1");
 

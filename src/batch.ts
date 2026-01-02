@@ -2,17 +2,22 @@
 import "dotenv/config";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { processDeliveryDocument } from "./lib/correlator.js";
+import {
+	groupFilesByPrefix,
+	processDocumentGroup,
+} from "./lib/document-grouper.js";
+import { extractDocumentGroup } from "./lib/extractor-v010.js";
 import {
 	generateExcel,
 	saveAsJSON,
-	toLademittelmahnungFormat,
+	v010ToLademittelmahnungFormat,
 } from "./lib/output-generator.js";
-import { processPDF } from "./lib/pdf-processor.js";
+import { validateAndEnrich } from "./lib/post-processor.js";
 import type {
-	BatchProcessingResult,
-	BatchSummary,
 	LademittelmahnungOutput,
+	V010BatchProcessingResult,
+	V010BatchSummary,
+	V010ExtractionData,
 } from "./types/index.js";
 
 function parseArgs(): { input: string; output: string } {
@@ -58,44 +63,75 @@ async function findPDFFiles(dirPath: string): Promise<string[]> {
 	return pdfFiles.sort();
 }
 
-async function processSingleFile(
-	inputPath: string,
+async function processGroup(
+	prefix: string,
+	files: string[],
 	outputDir: string,
-): Promise<BatchProcessingResult> {
+): Promise<V010BatchProcessingResult> {
 	const startTime = Date.now();
-	const filename = path.basename(inputPath);
-	const basename = path.basename(inputPath, ".pdf");
 
 	try {
-		console.log(`\nProcessing: ${filename}`);
+		console.log(`\nProcessing group: ${prefix} (${files.length} file(s))`);
+		for (const file of files) {
+			console.log(`  - ${path.basename(file)}`);
+		}
 
-		const pdfResult = await processPDF(inputPath);
-		console.log(`  Pages: ${pdfResult.totalPages}`);
+		const group = await processDocumentGroup(prefix, files);
+		console.log(`  Total pages: ${group.pages.length}`);
 
-		const extraction = await processDeliveryDocument(pdfResult.pages, filename);
+		const result = await extractDocumentGroup(group);
 
-		const lademittelmahnung = toLademittelmahnungFormat(extraction);
+		if (!result.success) {
+			throw new Error(result.error || "Extraction failed");
+		}
 
-		const extractionPath = path.join(outputDir, `${basename}_extraction.json`);
-		await saveAsJSON(extraction, extractionPath);
+		const enriched = validateAndEnrich(result);
 
-		let lademittelmahnungPath: string | undefined;
-		if (lademittelmahnung) {
-			lademittelmahnungPath = path.join(outputDir, `${basename}_result.json`);
-			await saveAsJSON(lademittelmahnung, lademittelmahnungPath);
+		const extractions = Array.isArray(enriched.data)
+			? enriched.data
+			: enriched.data
+				? [enriched.data]
+				: [];
+
+		const validExtractions = extractions.filter(
+			(e): e is V010ExtractionData => e !== undefined,
+		);
+
+		const lademittelmahnungResults = validExtractions.map(
+			v010ToLademittelmahnungFormat,
+		);
+
+		const extractionPath = path.join(outputDir, `${prefix}_extraction.json`);
+		await saveAsJSON(validExtractions, extractionPath);
+
+		if (lademittelmahnungResults.length > 0) {
+			const resultPath = path.join(outputDir, `${prefix}_result.json`);
+			await saveAsJSON(lademittelmahnungResults, resultPath);
 		}
 
 		const duration = Date.now() - startTime;
+		const avgConfidence =
+			validExtractions.length > 0
+				? validExtractions.reduce((sum, e) => sum + e.confidence, 0) /
+					validExtractions.length
+				: 0;
+
 		console.log(
-			`  Complete (${(duration / 1000).toFixed(2)}s) - Confidence: ${(extraction.extractionConfidence * 100).toFixed(1)}%`,
+			`  Complete (${(duration / 1000).toFixed(2)}s) - Confidence: ${(avgConfidence * 100).toFixed(1)}%`,
 		);
 
+		if (enriched.needsReview) {
+			console.log(`  NOTE: Flagged for review`);
+		}
+
 		return {
-			inputFile: inputPath,
+			groupPrefix: prefix,
+			inputFiles: files,
 			success: true,
-			extraction,
-			lademittelmahnung: lademittelmahnung || undefined,
+			extractions: validExtractions,
+			lademittelmahnung: lademittelmahnungResults,
 			processingTimeMs: duration,
+			needsReview: enriched.needsReview,
 		};
 	} catch (error) {
 		const duration = Date.now() - startTime;
@@ -103,10 +139,12 @@ async function processSingleFile(
 		console.error(`  Error: ${errorMessage}`);
 
 		return {
-			inputFile: inputPath,
+			groupPrefix: prefix,
+			inputFiles: files,
 			success: false,
 			error: errorMessage,
 			processingTimeMs: duration,
+			needsReview: true,
 		};
 	}
 }
@@ -127,7 +165,7 @@ async function main(): Promise<void> {
 	const timestamp = Date.now();
 	const outputDir = path.join(output, String(timestamp));
 
-	console.log(`\n=== Batch Pallet Movement Extraction ===`);
+	console.log(`\n=== Batch Pallet Movement Extraction (v0.10) ===`);
 	console.log(`Input directory:  ${input}`);
 	console.log(`Output directory: ${outputDir}/`);
 
@@ -140,30 +178,35 @@ async function main(): Promise<void> {
 
 	console.log(`\nFound ${pdfFiles.length} PDF file(s)`);
 
+	const fileGroups = groupFilesByPrefix(pdfFiles);
+	console.log(`Grouped into ${fileGroups.size} document group(s)`);
+
 	await fs.mkdir(outputDir, { recursive: true });
 
-	const results: BatchProcessingResult[] = [];
-	const lademittelmahnungResults: LademittelmahnungOutput[] = [];
+	const results: V010BatchProcessingResult[] = [];
+	const allLademittelmahnungResults: LademittelmahnungOutput[] = [];
 
-	for (const pdfFile of pdfFiles) {
-		const result = await processSingleFile(pdfFile, outputDir);
+	for (const [prefix, files] of fileGroups) {
+		const result = await processGroup(prefix, files, outputDir);
 		results.push(result);
 
 		if (result.lademittelmahnung) {
-			lademittelmahnungResults.push(result.lademittelmahnung);
+			allLademittelmahnungResults.push(...result.lademittelmahnung);
 		}
 	}
 
-	if (lademittelmahnungResults.length > 0) {
+	if (allLademittelmahnungResults.length > 0) {
 		console.log("\nGenerating combined Excel file...");
 		const excelPath = path.join(outputDir, "combined_results.xlsx");
-		await generateExcel(lademittelmahnungResults, excelPath);
+		await generateExcel(allLademittelmahnungResults, excelPath);
 	}
 
-	const summary: BatchSummary = {
+	const summary: V010BatchSummary = {
+		totalGroups: fileGroups.size,
 		totalFiles: pdfFiles.length,
 		successCount: results.filter((r) => r.success).length,
 		failureCount: results.filter((r) => !r.success).length,
+		needsReviewCount: results.filter((r) => r.needsReview).length,
 		results,
 	};
 
@@ -173,14 +216,23 @@ async function main(): Promise<void> {
 	const totalDuration = ((Date.now() - startTime) / 1000).toFixed(2);
 	console.log(`\n=== Batch Processing Complete ===`);
 	console.log(`Total duration: ${totalDuration}s`);
+	console.log(`Document groups: ${summary.totalGroups}`);
 	console.log(`Files processed: ${summary.totalFiles}`);
 	console.log(`Successful: ${summary.successCount}`);
 	console.log(`Failed: ${summary.failureCount}`);
+	console.log(`Needs review: ${summary.needsReviewCount}`);
 
 	if (summary.failureCount > 0) {
-		console.log(`\nFailed files:`);
+		console.log(`\nFailed groups:`);
 		for (const result of results.filter((r) => !r.success)) {
-			console.log(`  - ${path.basename(result.inputFile)}: ${result.error}`);
+			console.log(`  - ${result.groupPrefix}: ${result.error}`);
+		}
+	}
+
+	if (summary.needsReviewCount > 0) {
+		console.log(`\nGroups needing review:`);
+		for (const result of results.filter((r) => r.needsReview && r.success)) {
+			console.log(`  - ${result.groupPrefix}`);
 		}
 	}
 
