@@ -1,18 +1,13 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText, type LanguageModel } from "ai";
 import "dotenv/config";
+import { env } from "../env.js";
 
 const openrouter = createOpenRouter({
-	apiKey: process.env.OPENROUTER_API_KEY,
+	apiKey: env.OPENROUTER_API_KEY,
 });
 
-// const model: LanguageModel = openrouter("google/gemini-2.0-flash-001");
-// const model: LanguageModel = openrouter("google/gemini-3-flash-preview");
-// const model: LanguageModel = openrouter("google/gemini-3-pro-preview");
-// const model: LanguageModel = openrouter("google/gemini-2.5-pro");
-const model: LanguageModel = openrouter("anthropic/claude-opus-4.5");
-// const model: LanguageModel = openrouter("z-ai/glm-4.6v");
-// const model: LanguageModel = openrouter("openai/gpt-5.1");
+const model: LanguageModel = openrouter(env.OPENROUTER_MODEL);
 
 export interface AIMessage {
 	role: "user" | "assistant" | "system";

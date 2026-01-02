@@ -38,10 +38,6 @@ export function groupFilesByPrefix(filePaths: string[]): Map<string, string[]> {
 	return groups;
 }
 
-/**
- * Process a document group by converting all PDFs to images.
- * Pages are numbered sequentially across all files in the group.
- */
 export async function processDocumentGroup(
 	prefix: string,
 	filePaths: string[],
@@ -49,7 +45,6 @@ export async function processDocumentGroup(
 	const allPages: PDFPage[] = [];
 	let globalPageNumber = 0;
 
-	// Process files in sorted order
 	const sortedPaths = [...filePaths].sort();
 
 	for (const filePath of sortedPaths) {
@@ -71,10 +66,6 @@ export async function processDocumentGroup(
 	};
 }
 
-/**
- * Process all document groups from a list of files.
- * Returns an array of DocumentGroup, one per unique prefix.
- */
 export async function processAllGroups(
 	filePaths: string[],
 ): Promise<DocumentGroup[]> {
