@@ -7,6 +7,8 @@ import type {
 	LademittelmahnungOutput,
 	PalletMovement,
 	StopExtraction,
+	V010ExtractionData,
+	V010PalletMovement,
 } from "../types/index.js";
 
 function parseDateToNumber(dateStr: string | undefined): number {
@@ -187,6 +189,108 @@ function sumPallets(movements: PalletMovement[], palletType: string): number {
 	return movements
 		.filter((m) => m.palletType === palletType)
 		.reduce((sum, m) => sum + m.quantity, 0);
+}
+
+function sumV010Pallets(
+	movements: V010PalletMovement[],
+	palletType: string,
+): number {
+	return movements
+		.filter((m) => m.type === palletType)
+		.reduce((sum, m) => sum + m.qty, 0);
+}
+
+/**
+ * Convert V010ExtractionData to LademittelmahnungOutput format.
+ * Handles the new v0.10 schema with carrier perspective.
+ */
+export function v010ToLademittelmahnungFormat(
+	extraction: V010ExtractionData,
+): LademittelmahnungOutput {
+	const palletTypes = new Set<string>();
+	for (const movement of [
+		...extraction.palletsGiven,
+		...extraction.palletsReceived,
+	]) {
+		palletTypes.add(movement.type);
+	}
+
+	const palletMovements: LademittelmahnungOutput["palletMovements"] = [];
+
+	for (const palletType of palletTypes) {
+		const given = sumV010Pallets(extraction.palletsGiven, palletType);
+		const received = sumV010Pallets(extraction.palletsReceived, palletType);
+		const saldo = given - received;
+
+		if (given > 0 || received > 0) {
+			if (extraction.locationType === "pickup") {
+				palletMovements.push({
+					palletType,
+					pickupReceived: given,
+					pickupGiven: received,
+					deliveryGiven: 0,
+					deliveryReceived: 0,
+					saldo,
+				});
+			} else {
+				palletMovements.push({
+					palletType,
+					pickupReceived: 0,
+					pickupGiven: 0,
+					deliveryGiven: given,
+					deliveryReceived: received,
+					saldo,
+				});
+			}
+		}
+	}
+
+	const referenceNumber = extraction.references[0] || "UNKNOWN";
+
+	const locationInfo = {
+		date: extraction.date || "N/A",
+		time: undefined,
+		location: extraction.location.name || "N/A",
+		address: extraction.location.address || "N/A",
+	};
+
+	const pickupInfo = extraction.pickupLocation
+		? {
+				date: extraction.date || "N/A",
+				time: undefined,
+				location: extraction.pickupLocation.name || "N/A",
+				address: extraction.pickupLocation.address || "N/A",
+			}
+		: {
+				date: "N/A",
+				time: undefined,
+				location: "N/A",
+				address: "N/A",
+			};
+
+	return {
+		referenceNumber,
+		pickup: extraction.locationType === "pickup" ? locationInfo : pickupInfo,
+		delivery:
+			extraction.locationType === "delivery"
+				? locationInfo
+				: {
+						date: "N/A",
+						time: undefined,
+						location: "N/A",
+						address: "N/A",
+					},
+		palletMovements,
+	};
+}
+
+/**
+ * Convert multiple V010 extractions to LademittelmahnungOutput array.
+ */
+export function v010BatchToLademittelmahnungFormat(
+	extractions: V010ExtractionData[],
+): LademittelmahnungOutput[] {
+	return extractions.map(v010ToLademittelmahnungFormat);
 }
 
 export function toExcelRows(output: LademittelmahnungOutput): ExcelRow[] {

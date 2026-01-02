@@ -94,11 +94,47 @@ export interface LademittelmahnungOutput {
 export interface ClassificationResult {
 	documentType: DocumentType;
 	confidence: number;
-	identifiers: {
-		orderNumbers: string[];
-		dates: string[];
-		companies: string[];
+	references: string[];
+	reasoning?: string;
+}
+
+export type Perspective = "carrier" | "location";
+
+export interface V2PalletMovement {
+	type: PalletType;
+	qty: number;
+	damaged?: number;
+}
+
+export interface V2ExtractionData {
+	documentType: DocumentType;
+	perspective: Perspective;
+	locationType: LocationType;
+	location: {
+		name: string | null;
+		address: string | null;
 	};
+	date: string | null;
+	palletsGiven: V2PalletMovement[];
+	palletsReceived: V2PalletMovement[];
+	exchanged: boolean | null;
+	references: {
+		order: string | null;
+		delivery: string | null;
+		tour: string | null;
+		shipment: string | null;
+	};
+	parties: {
+		sender: { name: string | null; address: string | null };
+		recipient: { name: string | null; address: string | null };
+	};
+	signatures: {
+		driver: boolean;
+		customer: boolean;
+	};
+	notes: string[];
+	confidence: number;
+	warnings: string[];
 }
 
 export interface ExtractionResult<T = unknown> {
@@ -227,4 +263,164 @@ export interface PDFProcessingResult {
 	filePath: string;
 	totalPages: number;
 	pages: PDFPage[];
+}
+
+// ============================================================================
+// v0.10 Types - Single-Pass Architecture
+// ============================================================================
+
+export type V010DocumentType =
+	| "lieferschein"
+	| "lieferanweisung"
+	| "ladeliste"
+	| "ladeschein"
+	| "palettenschein"
+	| "palettennachweis"
+	| "wareneingangsbeleg"
+	| "we_beleg"
+	| "wareneingangsbestaetigung"
+	| "dpl_gutschrift"
+	| "desadv"
+	| "rueckladeschein"
+	| "europalettenschein"
+	| "speditions_auftrag"
+	| "speditions_uebergabeschein"
+	| "palettenbewegung"
+	| "mixed"
+	| "unknown";
+
+export type V010DocumentSubtype =
+	| "ladeliste"
+	| "ladeschein"
+	| "lieferschein"
+	| "speditions_auftrag"
+	| "wareneingangsbestaetigung"
+	| "palettenbewegung"
+	| "dpl_gutschrift"
+	| "desadv";
+
+export type V010Perspective =
+	| "carrier"
+	| "location"
+	| "shipper"
+	| "pool_operator";
+
+export type V010LocationType = "pickup" | "delivery" | "handoff";
+
+export type V010PalletType =
+	| "EUR"
+	| "EUR-NT"
+	| "Einweg"
+	| "Düsseldorfer"
+	| "CHEP"
+	| "CHEP-HALB"
+	| "CHEP-VIERTEL"
+	| "Gitterbox"
+	| "Plastik"
+	| "H1"
+	| "Rollcontainer"
+	| "Industrie"
+	| "unknown";
+
+export interface V010Location {
+	name: string | null;
+	warehouseId: string | null;
+	address: string | null;
+}
+
+export interface V010Carrier {
+	name: string | null;
+	subCarrier: string | null;
+	driverName: string | null;
+	driverCode: string | null;
+	vehicleNumber: string | null;
+	licensePlate: string | null;
+}
+
+export interface V010Shipper {
+	name: string | null;
+}
+
+export interface V010PalletMovement {
+	type: V010PalletType;
+	qty: number;
+	damaged?: number;
+	reason?: string;
+}
+
+export type V010NonExchangeReason =
+	| "driver_refused"
+	| "no_pallets_available"
+	| "goods_refused"
+	| null;
+
+export interface V010ExtractionData {
+	documentType: V010DocumentType;
+	documentSubtypes: V010DocumentSubtype[];
+	perspective: V010Perspective;
+	locationType: V010LocationType;
+
+	location: V010Location;
+	pickupLocation: V010Location | null;
+	carrier: V010Carrier;
+	shipper: V010Shipper | null;
+
+	date: string | null;
+	palletsGiven: V010PalletMovement[];
+	palletsReceived: V010PalletMovement[];
+	palletsReturned: V010PalletMovement[];
+	palletsLoadedOriginal: V010PalletMovement[];
+
+	references: string[];
+	exchanged: boolean | null;
+	exchangeExplicit: boolean | null;
+	exchangeComment: string | null;
+	nonExchangeReason: V010NonExchangeReason;
+
+	dplVoucherNumber: string | null;
+	dplIssued: boolean;
+	goodsPartiallyRefused: boolean;
+	goodsAcceptedUnderReservation: boolean;
+	palletsDamaged: boolean;
+	damageNotes: string | null;
+	refusalReasons: string[];
+
+	saldo: number | null;
+	confidence: number;
+	extractionNotes: string | null;
+}
+
+export interface DocumentGroup {
+	prefix: string;
+	files: string[];
+	pages: PDFPage[];
+}
+
+export interface GroupExtractionResult {
+	group: DocumentGroup;
+	success: boolean;
+	data?: V010ExtractionData | V010ExtractionData[];
+	error?: string;
+	processingTimeMs: number;
+	needsReview: boolean;
+}
+
+export interface V010BatchProcessingResult {
+	groupPrefix: string;
+	inputFiles: string[];
+	success: boolean;
+	extractions?: V010ExtractionData[];
+	lademittelmahnung?: LademittelmahnungOutput[];
+	error?: string;
+	processingTimeMs: number;
+	needsReview: boolean;
+}
+
+export interface V010BatchSummary {
+	totalGroups: number;
+	totalFiles: number;
+	successCount: number;
+	failureCount: number;
+	needsReviewCount: number;
+	results: V010BatchProcessingResult[];
 }
