@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,8 +17,12 @@ const app = new Hono();
 app.use("*", cors());
 
 app.use("/process", async (c, next) => {
-	const apiKey = c.req.header("X-API-Key");
-	if (apiKey !== env.API_KEY) {
+	const apiKey = c.req.header("X-API-Key") ?? "";
+	const expected = env.API_KEY;
+	const isValid =
+		apiKey.length === expected.length &&
+		crypto.timingSafeEqual(Buffer.from(apiKey), Buffer.from(expected));
+	if (!isValid) {
 		return c.json({ error: "Unauthorized" }, 401);
 	}
 	await next();
@@ -46,6 +51,13 @@ app.post("/process", async (c) => {
 			const file = files[i];
 			if (!(file instanceof File)) {
 				continue;
+			}
+
+			if (
+				file.type !== "application/pdf" &&
+				!file.name.toLowerCase().endsWith(".pdf")
+			) {
+				return c.json({ error: `Invalid file type: ${file.name}` }, 400);
 			}
 
 			const fileName = file.name || `upload_${i}.pdf`;
@@ -115,7 +127,9 @@ app.post("/process", async (c) => {
 		if (tempDir) {
 			try {
 				await fs.rm(tempDir, { recursive: true, force: true });
-			} catch {}
+			} catch (e) {
+				console.warn("Temp cleanup failed:", e);
+			}
 		}
 	}
 });
