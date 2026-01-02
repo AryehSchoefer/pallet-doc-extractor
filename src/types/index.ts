@@ -94,11 +94,47 @@ export interface LademittelmahnungOutput {
 export interface ClassificationResult {
 	documentType: DocumentType;
 	confidence: number;
-	identifiers: {
-		orderNumbers: string[];
-		dates: string[];
-		companies: string[];
+	references: string[];
+	reasoning?: string;
+}
+
+export type Perspective = "carrier" | "location";
+
+export interface V2PalletMovement {
+	type: PalletType;
+	qty: number;
+	damaged?: number;
+}
+
+export interface V2ExtractionData {
+	documentType: DocumentType;
+	perspective: Perspective;
+	locationType: LocationType;
+	location: {
+		name: string | null;
+		address: string | null;
 	};
+	date: string | null;
+	palletsGiven: V2PalletMovement[];
+	palletsReceived: V2PalletMovement[];
+	exchanged: boolean | null;
+	references: {
+		order: string | null;
+		delivery: string | null;
+		tour: string | null;
+		shipment: string | null;
+	};
+	parties: {
+		sender: { name: string | null; address: string | null };
+		recipient: { name: string | null; address: string | null };
+	};
+	signatures: {
+		driver: boolean;
+		customer: boolean;
+	};
+	notes: string[];
+	confidence: number;
+	warnings: string[];
 }
 
 export interface ExtractionResult<T = unknown> {

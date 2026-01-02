@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { processDeliveryDocument } from "./lib/correlator.js";
 import {
@@ -51,9 +52,15 @@ async function main(): Promise<void> {
 
 	const { input, output } = parseArgs();
 
+	const timestamp = Date.now();
+	const outputDir = path.join(path.dirname(output), String(timestamp));
+	const outputFile = path.join(outputDir, path.basename(output));
+
+	await fs.mkdir(outputDir, { recursive: true });
+
 	console.log(`\n=== Pallet Movement Extraction ===`);
 	console.log(`Input:  ${input}`);
-	console.log(`Output: ${output}`);
+	console.log(`Output: ${outputDir}/`);
 	console.log();
 
 	try {
@@ -78,11 +85,11 @@ async function main(): Promise<void> {
 
 		console.log("\nStep 4: Saving results...");
 
-		const extractionPath = output.replace(".json", "_extraction.json");
+		const extractionPath = outputFile.replace(".json", "_extraction.json");
 		await saveAsJSON(extraction, extractionPath);
 
 		if (lademittelmahnung) {
-			await saveAsJSON(lademittelmahnung, output);
+			await saveAsJSON(lademittelmahnung, outputFile);
 		}
 
 		const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -115,7 +122,7 @@ async function main(): Promise<void> {
 
 		console.log(`\nRaw extraction saved to: ${extractionPath}`);
 		if (lademittelmahnung) {
-			console.log(`Condensed results saved to: ${output}`);
+			console.log(`Condensed results saved to: ${outputFile}`);
 		} else {
 			console.log(
 				`Note: Condensed results file was NOT created (no valid stops found)`,

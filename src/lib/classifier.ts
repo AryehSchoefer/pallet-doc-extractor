@@ -1,4 +1,4 @@
-import { CLASSIFICATION_PROMPT } from "../prompts/classifier.js";
+import { V2_CLASSIFIER_PROMPT } from "../prompts/v2.js";
 import type {
 	ClassificationResult,
 	DocumentType,
@@ -9,11 +9,7 @@ import { analyzeImage, parseJSONResponse, withRetry } from "./ai-client.js";
 interface RawClassificationResponse {
 	documentType: string;
 	confidence: number;
-	identifiers: {
-		orderNumbers: string[];
-		dates: string[];
-		companies: string[];
-	};
+	references: string[];
 	reasoning?: string;
 }
 
@@ -40,21 +36,15 @@ export async function classifyPage(
 	page: PDFPage,
 ): Promise<ClassificationResult> {
 	return withRetry(async () => {
-		const response = await analyzeImage(
-			page.imageBase64,
-			CLASSIFICATION_PROMPT,
-		);
+		const response = await analyzeImage(page.imageBase64, V2_CLASSIFIER_PROMPT);
 
 		const parsed = parseJSONResponse<RawClassificationResponse>(response);
 
 		return {
 			documentType: normalizeDocumentType(parsed.documentType),
 			confidence: Math.max(0, Math.min(1, parsed.confidence)),
-			identifiers: {
-				orderNumbers: parsed.identifiers?.orderNumbers || [],
-				dates: parsed.identifiers?.dates || [],
-				companies: parsed.identifiers?.companies || [],
-			},
+			references: parsed.references || [],
+			reasoning: parsed.reasoning,
 		};
 	});
 }
@@ -84,7 +74,7 @@ export async function classifyAllPages(
 						result: {
 							documentType: "unknown" as DocumentType,
 							confidence: 0,
-							identifiers: { orderNumbers: [], dates: [], companies: [] },
+							references: [],
 						},
 					};
 				}
@@ -103,22 +93,22 @@ export function groupPagesByDelivery(
 	classifications: Map<number, ClassificationResult>,
 ): Map<string, number[]> {
 	const groups = new Map<string, number[]>();
-	const orderToPages = new Map<string, Set<number>>();
+	const refToPages = new Map<string, Set<number>>();
 
 	for (const [pageNum, result] of classifications) {
-		for (const orderNum of result.identifiers.orderNumbers) {
-			if (!orderToPages.has(orderNum)) {
-				orderToPages.set(orderNum, new Set());
+		for (const ref of result.references) {
+			if (!refToPages.has(ref)) {
+				refToPages.set(ref, new Set());
 			}
-			orderToPages.get(orderNum)?.add(pageNum);
+			refToPages.get(ref)?.add(pageNum);
 		}
 	}
 
 	let groupIndex = 0;
 	const assignedPages = new Set<number>();
 
-	for (const [orderNum, pages] of orderToPages) {
-		const groupKey = `delivery_${groupIndex++}_${orderNum}`;
+	for (const [ref, pages] of refToPages) {
+		const groupKey = `delivery_${groupIndex++}_${ref}`;
 		groups.set(
 			groupKey,
 			Array.from(pages).sort((a, b) => a - b),

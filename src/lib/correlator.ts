@@ -1,35 +1,21 @@
 import type {
-	ClassificationResult,
 	DeliveryExtraction,
 	DocumentPage,
-	ExtractionResult,
-	LadelisteData,
-	LieferscheinData,
-	PalettennachweisData,
 	PalletMovement,
 	PDFPage,
 	StopExtraction,
-	WareneingangselegData,
+	V2ExtractionData,
+	V2PalletMovement,
 } from "../types/index.js";
 import { classifyPage } from "./classifier.js";
-import { extractByType } from "./extractors/index.js";
+import { extractPage } from "./extractor.js";
 
-async function processPage(page: PDFPage): Promise<{
-	classification: ClassificationResult;
-	extraction: ExtractionResult<unknown>;
-	documentPage: DocumentPage;
-}> {
-	const classification = await classifyPage(page);
-	const extraction = await extractByType(page, classification.documentType);
-
-	const documentPage: DocumentPage = {
-		pageNumber: page.pageNumber,
-		documentType: classification.documentType,
-		confidence: classification.confidence,
-		rawExtraction: extraction.data,
-	};
-
-	return { classification, extraction, documentPage };
+function v2ToPalletMovement(movements: V2PalletMovement[]): PalletMovement[] {
+	return movements.map((m) => ({
+		palletType: m.type,
+		quantity: m.qty,
+		damaged: m.damaged,
+	}));
 }
 
 function mergePalletMovements(movements: PalletMovement[]): PalletMovement[] {
@@ -51,129 +37,66 @@ function mergePalletMovements(movements: PalletMovement[]): PalletMovement[] {
 	return Array.from(merged.values());
 }
 
-function extractStopsFromLieferschein(
-	_data: LieferscheinData,
-): Partial<StopExtraction>[] {
-	// Lieferschein contains shipper/consignee info, not physical stop locations
-	return [];
-}
+function extractionToStop(data: V2ExtractionData): StopExtraction {
+	let palletsReceived: PalletMovement[];
+	let palletsGiven: PalletMovement[];
 
-// Palettennachweis is from location's perspective - swap to carrier's perspective
-function extractStopsFromPalettennachweis(
-	data: PalettennachweisData,
-): Partial<StopExtraction>[] {
-	const carrierReceived = data.palletsGiven;
-	const carrierGave = data.palletsReceived;
-
-	const totalReceived = carrierReceived.reduce((sum, p) => sum + p.quantity, 0);
-	const totalGave = carrierGave.reduce((sum, p) => sum + p.quantity, 0);
-
-	let locationType: "pickup" | "delivery";
-	if (totalReceived > 0 && totalGave === 0) {
-		locationType = "pickup";
-	} else if (totalGave > 0 && totalReceived === 0) {
-		locationType = "delivery";
-	} else if (totalReceived > totalGave) {
-		locationType = "pickup";
+	if (data.perspective === "location") {
+		palletsReceived = v2ToPalletMovement(data.palletsGiven);
+		palletsGiven = v2ToPalletMovement(data.palletsReceived);
 	} else {
-		locationType = "delivery";
+		palletsReceived = v2ToPalletMovement(data.palletsReceived);
+		palletsGiven = v2ToPalletMovement(data.palletsGiven);
 	}
 
-	const locationName = data.fromCompany || data.toCompany || "Unknown";
-	const locationAddress = data.location;
-
-	const stop: Partial<StopExtraction> = {
-		locationType,
-		locationName,
-		locationAddress,
-		date: data.date,
-		palletsReceived: carrierReceived,
-		palletsGiven: carrierGave,
-		exchanged: carrierReceived.length > 0 && carrierGave.length > 0,
+	return {
+		locationType: data.locationType,
+		locationName: data.location.name || "Unknown",
+		locationAddress: data.location.address || undefined,
+		date: data.date || undefined,
+		palletsReceived,
+		palletsGiven,
+		exchanged: data.exchanged ?? false,
 		signatures: data.signatures,
-		notes: data.notes,
+		notes: data.notes.length > 0 ? data.notes : undefined,
 	};
-
-	return [stop];
 }
 
-// Wareneingangsbeleg is from recipient's perspective - swap to carrier's perspective
-function extractStopsFromWareneingangsbeleg(
-	data: WareneingangselegData,
-): Partial<StopExtraction>[] {
-	const palletsReceived: PalletMovement[] = [];
-	const palletsGiven: PalletMovement[] = [];
+function mergeStops(stops: StopExtraction[]): StopExtraction[] {
+	const locationMap = new Map<string, StopExtraction>();
 
-	for (const exchange of data.palletExchange) {
-		if (exchange.received > 0) {
-			palletsGiven.push({
-				palletType: exchange.palletType,
-				quantity: exchange.received,
-			});
-		}
-		if (exchange.returned > 0) {
-			palletsReceived.push({
-				palletType: exchange.palletType,
-				quantity: exchange.returned,
-			});
+	for (const stop of stops) {
+		const key = `${stop.locationType}_${stop.locationName.toLowerCase()}`;
+
+		const existing = locationMap.get(key);
+		if (existing) {
+			existing.palletsReceived = mergePalletMovements([
+				...existing.palletsReceived,
+				...stop.palletsReceived,
+			]);
+			existing.palletsGiven = mergePalletMovements([
+				...existing.palletsGiven,
+				...stop.palletsGiven,
+			]);
+			existing.date = existing.date || stop.date;
+			existing.locationAddress =
+				existing.locationAddress || stop.locationAddress;
+			existing.exchanged = existing.exchanged || stop.exchanged;
+			if (stop.signatures) {
+				existing.signatures = {
+					driver: existing.signatures?.driver || stop.signatures.driver,
+					customer: existing.signatures?.customer || stop.signatures.customer,
+				};
+			}
+			if (stop.notes) {
+				existing.notes = [...(existing.notes || []), ...stop.notes];
+			}
+		} else {
+			locationMap.set(key, { ...stop });
 		}
 	}
 
-	return [
-		{
-			locationType: "delivery",
-			locationName: "__DELIVERY_LOCATION__",
-			date: data.date,
-			palletsReceived,
-			palletsGiven,
-			exchanged: palletsReceived.length > 0 && palletsGiven.length > 0,
-			notes: data.notes,
-		},
-	];
-}
-
-// Ladeliste shows pickup location (Beladeort) and pallets loaded
-function extractStopsFromLadeliste(
-	data: LadelisteData,
-): Partial<StopExtraction>[] {
-	const stops: Partial<StopExtraction>[] = [];
-
-	if (data.beladeort && (data.beladeort.name || data.beladeort.address)) {
-		stops.push({
-			locationType: "pickup" as const,
-			locationName: data.beladeort.name || "Pickup Location",
-			locationAddress: data.beladeort.address,
-			date: data.pickupDate || data.date,
-			palletsReceived: data.totalPallets || [],
-			palletsGiven: [],
-			notes: data.handwrittenNotes,
-		});
-	} else if (data.stops.length > 0) {
-		const firstStop = data.stops[0];
-		stops.push({
-			locationType: "pickup" as const,
-			locationName: firstStop.customerName || `Pickup ${firstStop.stopNumber}`,
-			locationAddress: firstStop.address,
-			date: data.pickupDate || data.date,
-			palletsReceived:
-				firstStop.pallets.length > 0
-					? firstStop.pallets
-					: data.totalPallets || [],
-			palletsGiven: [],
-			notes: data.handwrittenNotes,
-		});
-	} else if (data.totalPallets && data.totalPallets.length > 0) {
-		stops.push({
-			locationType: "pickup" as const,
-			locationName: "Unknown Pickup Location",
-			date: data.pickupDate || data.date,
-			palletsReceived: data.totalPallets,
-			palletsGiven: [],
-			notes: data.handwrittenNotes,
-		});
-	}
-
-	return stops;
+	return Array.from(locationMap.values());
 }
 
 export async function correlateDocuments(
@@ -182,167 +105,93 @@ export async function correlateDocuments(
 ): Promise<DeliveryExtraction> {
 	const processedPages: DocumentPage[] = [];
 	const allWarnings: string[] = [];
-	let totalConfidence = 0;
+	const allStops: StopExtraction[] = [];
 
 	const references: DeliveryExtraction["references"] = {};
-	const allStops: Partial<StopExtraction>[] = [];
 	let shipper: string | undefined;
-	let carrier: string | undefined;
 	let consignee: string | undefined;
 	let consigneeAddress: string | undefined;
 	let vehiclePlate: string | undefined;
 	let driverName: string | undefined;
+	let totalConfidence = 0;
 
 	for (const page of pages) {
 		try {
-			const { classification, extraction, documentPage } =
-				await processPage(page);
-			processedPages.push(documentPage);
-			totalConfidence += extraction.confidence;
+			const classification = await classifyPage(page);
+			const extraction = await extractPage(page);
 
-			if (extraction.warnings) {
-				allWarnings.push(...extraction.warnings);
+			processedPages.push({
+				pageNumber: page.pageNumber,
+				documentType: classification.documentType,
+				confidence: classification.confidence,
+				rawExtraction: extraction.data,
+			});
+
+			if (!extraction.success || !extraction.data) {
+				allWarnings.push(`Page ${page.pageNumber}: extraction failed`);
+				continue;
 			}
 
-			for (const orderNum of classification.identifiers.orderNumbers) {
-				if (!references.orderNumber) {
-					references.orderNumber = orderNum;
-				} else if (
-					!references.deliveryNumber &&
-					orderNum !== references.orderNumber
-				) {
-					references.deliveryNumber = orderNum;
-				}
+			const data = extraction.data;
+			totalConfidence += data.confidence;
+			allWarnings.push(...data.warnings);
+
+			references.orderNumber =
+				references.orderNumber || data.references.order || undefined;
+			references.deliveryNumber =
+				references.deliveryNumber || data.references.delivery || undefined;
+			references.tourNumber =
+				references.tourNumber || data.references.tour || undefined;
+
+			shipper = shipper || data.parties.sender?.name || undefined;
+			consignee = consignee || data.parties.recipient?.name || undefined;
+			consigneeAddress =
+				consigneeAddress || data.parties.recipient?.address || undefined;
+
+			if (data.documentType === "ladeliste") {
+				driverName =
+					driverName ||
+					data.notes.find((n) => n.includes("driver")) ||
+					undefined;
 			}
 
-			if (extraction.success && extraction.data) {
-				switch (classification.documentType) {
-					case "lieferschein": {
-						const data = extraction.data as LieferscheinData;
-						references.orderNumber =
-							references.orderNumber || data.stammnummer || data.belegnummer;
-						references.tourNumber = references.tourNumber || data.tour;
-						shipper = shipper || data.sender?.name;
-						consignee = consignee || data.recipient?.name;
-						consigneeAddress = consigneeAddress || data.recipient?.address;
-						allStops.push(...extractStopsFromLieferschein(data));
-						break;
-					}
-					case "palettennachweis": {
-						const data = extraction.data as PalettennachweisData;
-						allStops.push(...extractStopsFromPalettennachweis(data));
-						break;
-					}
-					case "wareneingangsbeleg": {
-						const data = extraction.data as WareneingangselegData;
-						references.deliveryNumber =
-							references.deliveryNumber || data.deliveryNumber;
-						allStops.push(...extractStopsFromWareneingangsbeleg(data));
-						break;
-					}
-					case "ladeliste": {
-						const data = extraction.data as LadelisteData;
-						references.tourNumber = references.tourNumber || data.tour;
-						vehiclePlate = vehiclePlate || data.vehiclePlate;
-						driverName = driverName || data.driver;
-						allStops.push(...extractStopsFromLadeliste(data));
-						break;
-					}
-				}
+			if (
+				data.location.name ||
+				data.palletsGiven.length > 0 ||
+				data.palletsReceived.length > 0
+			) {
+				allStops.push(extractionToStop(data));
 			}
 		} catch (error) {
-			allWarnings.push(`Failed to process page ${page.pageNumber}: ${error}`);
-		}
-	}
-
-	for (const stop of allStops) {
-		if (stop.locationName === "__DELIVERY_LOCATION__") {
-			if (consignee) {
-				stop.locationName = consignee;
-				stop.locationAddress = consigneeAddress;
-			} else {
-				stop.locationName = "Unknown Delivery Location";
-				allWarnings.push("Delivery location not found in Lieferschein");
-			}
-		}
-	}
-
-	const hasPickupStops = allStops.some((s) => s.locationType === "pickup");
-	const hasDeliveryStops = allStops.some((s) => s.locationType === "delivery");
-
-	let lieferDatum: string | undefined;
-	let lieferscheinPallets: PalletMovement[] = [];
-	for (const page of processedPages) {
-		if (page.documentType === "lieferschein" && page.rawExtraction) {
-			const lieferscheinData = page.rawExtraction as LieferscheinData;
-			lieferDatum = lieferDatum || lieferscheinData.lieferdatum;
-			if (
-				lieferscheinData.palletInfo &&
-				lieferscheinData.palletInfo.length > 0
-			) {
-				lieferscheinPallets = lieferscheinData.palletInfo;
-			}
-		}
-	}
-
-	if (hasPickupStops && !hasDeliveryStops && consignee) {
-		const pickupPallets = allStops
-			.filter((s) => s.locationType === "pickup")
-			.flatMap((s) => s.palletsReceived || []);
-
-		const deliveryPallets =
-			pickupPallets.length > 0 ? pickupPallets : lieferscheinPallets;
-
-		if (deliveryPallets.length > 0 || consignee) {
-			allStops.push({
-				locationType: "delivery",
-				locationName: consignee,
-				locationAddress: consigneeAddress,
-				date: lieferDatum,
-				palletsReceived: deliveryPallets.map((p) => ({ ...p })),
-				palletsGiven: deliveryPallets.map((p) => ({ ...p })),
-				exchanged: true,
-			});
 			allWarnings.push(
-				"No wareneingangsbeleg found. Created delivery stop from Lieferschein consignee. Pallet exchange assumed (deliveryReceived = deliveryGiven).",
+				`Page ${page.pageNumber}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
 
 	if (allStops.length === 0 && consignee) {
-		let totalPallets: PalletMovement[] = [];
-		let ladelisteDate: string | undefined;
+		allWarnings.push("No stops extracted from documents");
+	}
 
-		for (const page of processedPages) {
-			if (page.documentType === "ladeliste" && page.rawExtraction) {
-				const ladelisteData = page.rawExtraction as LadelisteData;
-				if (
-					ladelisteData.totalPallets &&
-					ladelisteData.totalPallets.length > 0
-				) {
-					totalPallets = ladelisteData.totalPallets;
-					ladelisteDate = ladelisteData.date;
-					break;
-				}
-			}
-		}
+	const hasPickupStops = allStops.some((s) => s.locationType === "pickup");
+	const hasDeliveryStops = allStops.some((s) => s.locationType === "delivery");
 
-		const palletsToUse =
-			totalPallets.length > 0 ? totalPallets : lieferscheinPallets;
-		const dateToUse = ladelisteDate || lieferDatum;
+	if (hasPickupStops && !hasDeliveryStops && consignee) {
+		const pickupPallets = allStops
+			.filter((s) => s.locationType === "pickup")
+			.flatMap((s) => s.palletsReceived);
 
-		if (palletsToUse.length > 0) {
+		if (pickupPallets.length > 0) {
 			allStops.push({
 				locationType: "delivery",
 				locationName: consignee,
 				locationAddress: consigneeAddress,
-				date: dateToUse,
-				palletsReceived: [],
-				palletsGiven: palletsToUse,
-				exchanged: false,
+				palletsReceived: pickupPallets.map((p) => ({ ...p })),
+				palletsGiven: pickupPallets.map((p) => ({ ...p })),
+				exchanged: true,
 			});
 			allWarnings.push(
-				"No palettennachweis, wareneingangsbeleg, or ladeliste stops found. Created minimal delivery stop.",
+				"Created delivery stop from consignee - assumed pallet exchange",
 			);
 		}
 	}
@@ -354,7 +203,6 @@ export async function correlateDocuments(
 	return {
 		references,
 		shipper,
-		carrier,
 		consignee,
 		vehiclePlate,
 		driverName,
@@ -364,58 +212,6 @@ export async function correlateDocuments(
 		extractionConfidence: avgConfidence,
 		warnings: allWarnings,
 	};
-}
-
-function mergeStops(stops: Partial<StopExtraction>[]): StopExtraction[] {
-	const locationMap = new Map<string, StopExtraction>();
-
-	for (const stop of stops) {
-		const key = stop.locationName?.toLowerCase() || "unknown";
-
-		const existing = locationMap.get(key);
-		if (existing) {
-			existing.palletsReceived = mergePalletMovements([
-				...existing.palletsReceived,
-				...(stop.palletsReceived || []),
-			]);
-			existing.palletsGiven = mergePalletMovements([
-				...existing.palletsGiven,
-				...(stop.palletsGiven || []),
-			]);
-
-			existing.date = existing.date || stop.date;
-			existing.time = existing.time || stop.time;
-			existing.locationAddress =
-				existing.locationAddress || stop.locationAddress;
-			existing.exchanged = existing.exchanged || stop.exchanged || false;
-
-			if (stop.signatures) {
-				existing.signatures = {
-					driver: existing.signatures?.driver || stop.signatures.driver,
-					customer: existing.signatures?.customer || stop.signatures.customer,
-				};
-			}
-
-			if (stop.notes) {
-				existing.notes = [...(existing.notes || []), ...stop.notes];
-			}
-		} else {
-			locationMap.set(key, {
-				locationType: stop.locationType || "delivery",
-				locationName: stop.locationName || "Unknown",
-				locationAddress: stop.locationAddress,
-				date: stop.date,
-				time: stop.time,
-				palletsReceived: stop.palletsReceived || [],
-				palletsGiven: stop.palletsGiven || [],
-				exchanged: stop.exchanged || false,
-				signatures: stop.signatures,
-				notes: stop.notes,
-			});
-		}
-	}
-
-	return Array.from(locationMap.values());
 }
 
 export async function processDeliveryDocument(

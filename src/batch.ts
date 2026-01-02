@@ -124,9 +124,12 @@ async function main(): Promise<void> {
 
 	const { input, output } = parseArgs();
 
+	const timestamp = Date.now();
+	const outputDir = path.join(output, String(timestamp));
+
 	console.log(`\n=== Batch Pallet Movement Extraction ===`);
 	console.log(`Input directory:  ${input}`);
-	console.log(`Output directory: ${output}`);
+	console.log(`Output directory: ${outputDir}/`);
 
 	const pdfFiles = await findPDFFiles(input);
 
@@ -137,13 +140,13 @@ async function main(): Promise<void> {
 
 	console.log(`\nFound ${pdfFiles.length} PDF file(s)`);
 
-	await fs.mkdir(output, { recursive: true });
+	await fs.mkdir(outputDir, { recursive: true });
 
 	const results: BatchProcessingResult[] = [];
 	const lademittelmahnungResults: LademittelmahnungOutput[] = [];
 
 	for (const pdfFile of pdfFiles) {
-		const result = await processSingleFile(pdfFile, output);
+		const result = await processSingleFile(pdfFile, outputDir);
 		results.push(result);
 
 		if (result.lademittelmahnung) {
@@ -153,7 +156,7 @@ async function main(): Promise<void> {
 
 	if (lademittelmahnungResults.length > 0) {
 		console.log("\nGenerating combined Excel file...");
-		const excelPath = path.join(output, "combined_results.xlsx");
+		const excelPath = path.join(outputDir, "combined_results.xlsx");
 		await generateExcel(lademittelmahnungResults, excelPath);
 	}
 
@@ -164,7 +167,7 @@ async function main(): Promise<void> {
 		results,
 	};
 
-	const summaryPath = path.join(output, "batch_summary.json");
+	const summaryPath = path.join(outputDir, "batch_summary.json");
 	await saveAsJSON(summary, summaryPath);
 
 	const totalDuration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -181,7 +184,7 @@ async function main(): Promise<void> {
 		}
 	}
 
-	console.log(`\nResults saved to: ${output}`);
+	console.log(`\nResults saved to: ${outputDir}/`);
 }
 
 main();

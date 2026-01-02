@@ -1,8 +1,7 @@
 node_modules/
 dist/
 .env
-output/*.json
-output/*.xlsx
+output/
 *.log
 .DS_Store
 test-documents/
