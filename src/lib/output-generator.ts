@@ -220,7 +220,7 @@ export function v010ToLademittelmahnungFormat(
 	for (const palletType of palletTypes) {
 		const given = sumV010Pallets(extraction.palletsGiven, palletType);
 		const received = sumV010Pallets(extraction.palletsReceived, palletType);
-		const saldo = given - received;
+		const saldo = received - given;
 
 		if (given > 0 || received > 0) {
 			if (extraction.locationType === "pickup") {

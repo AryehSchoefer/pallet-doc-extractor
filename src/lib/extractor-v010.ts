@@ -1,3 +1,4 @@
+import { decodePrompt, env } from "../env.js";
 import { V010_EXTRACTION_PROMPT } from "../prompts/v010.js";
 import type {
 	DocumentGroup,
@@ -16,6 +17,11 @@ import {
 	parseJSONResponse,
 	withRetry,
 } from "./ai-client.js";
+
+function getExtractionPrompt(): string {
+	const envPrompt = decodePrompt(env.EXTRACTION_PROMPT_BASE64);
+	return envPrompt || V010_EXTRACTION_PROMPT;
+}
 
 interface RawV010Response {
 	documentType: string;
@@ -285,7 +291,7 @@ export async function extractDocumentGroup(
 		const images = group.pages.map((p) => p.imageBase64);
 
 		const response = await withRetry(async () => {
-			return analyzeMultipleImages(images, V010_EXTRACTION_PROMPT);
+			return analyzeMultipleImages(images, getExtractionPrompt());
 		});
 
 		const parsed = parseJSONResponse<RawV010Response | RawV010Response[]>(

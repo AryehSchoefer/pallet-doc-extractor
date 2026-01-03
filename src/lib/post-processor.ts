@@ -4,11 +4,6 @@ import type {
 	V010PalletMovement,
 } from "../types/index.js";
 
-/**
- * Calculate the net saldo for pallet movements.
- * Positive = carrier debt (gave more than received)
- * Negative = carrier credit (received more than gave)
- */
 export function calculateSaldo(extraction: V010ExtractionData): number {
 	const sumQty = (movements: V010PalletMovement[]): number =>
 		movements.reduce((sum, m) => sum + m.qty, 0);
@@ -19,9 +14,6 @@ export function calculateSaldo(extraction: V010ExtractionData): number {
 	return given - received;
 }
 
-/**
- * Calculate saldo per pallet type.
- */
 export function calculateSaldoByType(
 	extraction: V010ExtractionData,
 ): Map<string, number> {
@@ -40,9 +32,6 @@ export function calculateSaldoByType(
 	return saldoByType;
 }
 
-/**
- * Validate extraction data and add warnings for issues.
- */
 function validateExtraction(extraction: V010ExtractionData): string[] {
 	const warnings: string[] = [];
 
@@ -88,9 +77,6 @@ function validateExtraction(extraction: V010ExtractionData): string[] {
 	return warnings;
 }
 
-/**
- * Enrich extraction data with calculated fields.
- */
 function enrichExtraction(extraction: V010ExtractionData): V010ExtractionData {
 	const calculatedSaldo = calculateSaldo(extraction);
 
@@ -100,9 +86,6 @@ function enrichExtraction(extraction: V010ExtractionData): V010ExtractionData {
 	};
 }
 
-/**
- * Validate and enrich a single extraction.
- */
 function processExtraction(extraction: V010ExtractionData): {
 	data: V010ExtractionData;
 	warnings: string[];
@@ -204,9 +187,6 @@ export function mergeExtractions(
 	};
 }
 
-/**
- * Consolidate pallet movements by type (sum quantities).
- */
 function consolidatePalletMovements(
 	movements: V010PalletMovement[],
 ): V010PalletMovement[] {
