@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { env } from "./env.js";
 import { processDocumentGroup } from "./lib/document-grouper.js";
@@ -15,6 +16,8 @@ import type { V010ExtractionData } from "./types/index.js";
 const app = new Hono();
 
 app.use("*", cors());
+
+app.use("/process", bodyLimit({ maxSize: 100 * 1024 * 1024 })); // 100MB total
 
 app.use("/process", async (c, next) => {
 	const apiKey = c.req.header("X-API-Key") ?? "";
