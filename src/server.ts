@@ -44,6 +44,20 @@ app.post("/process", async (c) => {
 			return c.json({ error: "No files provided" }, 400);
 		}
 
+		if (files.length > 10) {
+			return c.json({ error: "Too many files (max 10)" }, 400);
+		}
+
+		const maxSize = 10 * 1024 * 1024; // 10MB
+		for (const file of files) {
+			if (file instanceof File && file.size > maxSize) {
+				return c.json(
+					{ error: `File too large: ${file.name} (max 10MB)` },
+					400,
+				);
+			}
+		}
+
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pallet-extract-"));
 		const pdfPaths: string[] = [];
 
