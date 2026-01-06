@@ -308,8 +308,10 @@ export type V010Perspective =
 export type V010LocationType = "pickup" | "delivery" | "handoff";
 
 export type V010PalletType =
+	| "EURO-Palette"
 	| "EUR"
 	| "EUR-NT"
+	| "Einweg-Palette"
 	| "Einweg"
 	| "Düsseldorfer"
 	| "CHEP"
@@ -319,6 +321,7 @@ export type V010PalletType =
 	| "Plastik"
 	| "H1"
 	| "Rollcontainer"
+	| "Industrie-Palette"
 	| "Industrie"
 	| "unknown";
 
@@ -423,4 +426,212 @@ export interface V010BatchSummary {
 	failureCount: number;
 	needsReviewCount: number;
 	results: V010BatchProcessingResult[];
+}
+
+// ============================================================================
+// Two-Pass Extraction Types
+// ============================================================================
+
+/**
+ * Document types for classification pass
+ */
+export type TwoPassDocumentType =
+	// Relevant document types
+	| "ladeliste"
+	| "ladeschein"
+	| "lieferschein_with_pallets"
+	| "palettenschein"
+	| "palettennachweis"
+	| "dpl_gutschrift"
+	| "wareneingangsbeleg"
+	| "wareneingangsbestaetigung"
+	| "desadv_with_stamps"
+	| "speditions_auftrag"
+	| "palettenbewegung"
+	| "other_relevant"
+	// Irrelevant document types
+	| "lieferschein_product_only"
+	| "desadv_no_stamps"
+	| "pfand_berechnung"
+	| "invoice"
+	| "blank"
+	| "other_irrelevant"
+	| "unknown";
+
+/**
+ * Result of classifying a single page
+ */
+export interface PageClassification {
+	pageNumber: number;
+	isRelevant: boolean;
+	documentType: TwoPassDocumentType;
+	confidence: number;
+	keyReferences: string[];
+	palletInfoFound: string | null;
+	reason: string;
+}
+
+/**
+ * Result of the classification pass for all pages
+ */
+export interface ClassificationPassResult {
+	pages: PageClassification[];
+	relevantPageNumbers: number[];
+	documentTypesFound: TwoPassDocumentType[];
+	totalPages: number;
+	relevantPages: number;
+}
+
+/**
+ * Stop/location information for extraction
+ */
+export interface TwoPassStopInfo {
+	date: string | null;
+	time: string | null;
+	location: string | null;
+	address: string | null;
+	warehouseId: string | null;
+	übernommen: number;
+	überlassen: number;
+}
+
+/**
+ * Carrier information
+ */
+export interface TwoPassCarrier {
+	name: string | null;
+	licensePlate: string | null;
+	driverCode: string | null;
+	driverName: string | null;
+}
+
+/**
+ * Reference numbers found in documents
+ */
+export interface TwoPassReferences {
+	sendungsnummer: string | null;
+	lieferscheinNr: string | null;
+	ladenummer: string | null;
+	dplVoucherNr: string | null;
+	tourNr: string | null;
+}
+
+/**
+ * Exchange status details
+ */
+export interface TwoPassExchangeStatus {
+	exchanged: boolean | null;
+	partial: boolean;
+	comment: string | null;
+	dplIssued: boolean;
+	nonExchangeReason: string | null;
+}
+
+/**
+ * Result of extraction pass
+ */
+export interface TwoPassExtractionResult {
+	pickup: TwoPassStopInfo;
+	delivery: TwoPassStopInfo;
+	palletType: V010PalletType;
+	saldo: number;
+	carrier: TwoPassCarrier;
+	references: TwoPassReferences;
+	exchangeStatus: TwoPassExchangeStatus;
+	confidence: number;
+	notes: string | null;
+}
+
+/**
+ * Pallet movement in Lademittelmahnung format
+ */
+export interface TwoPassPalletMovement {
+	palletType: string;
+	beladestelle: {
+		übernommen: number;
+		überlassen: number;
+	};
+	entladestelle: {
+		überlassen: number;
+		übernommen: number;
+	};
+	saldo: number;
+}
+
+/**
+ * Final output in Lademittelmahnung format
+ */
+export interface TwoPassLademittelmahnungOutput {
+	referenceNumber: string;
+	pickup: {
+		date: string;
+		time: string | null;
+		location: string;
+		address: string;
+	};
+	delivery: {
+		date: string;
+		time: string | null;
+		location: string;
+		address: string;
+	};
+	palletMovements: TwoPassPalletMovement[];
+	carrier: TwoPassCarrier;
+	exchangeStatus: TwoPassExchangeStatus;
+	dplVoucherNr: string | null;
+	confidence: number;
+	notes: string | null;
+	needsReview: boolean;
+	reviewReasons: string[];
+}
+
+/**
+ * Validation result from validation utility
+ */
+export interface ValidationResult {
+	result: TwoPassExtractionResult;
+	errors: string[];
+	warnings: string[];
+	corrected: boolean;
+	isValid: boolean;
+}
+
+/**
+ * Complete two-pass processing result
+ */
+export interface TwoPassProcessingResult {
+	classification: ClassificationPassResult;
+	extractions: TwoPassExtractionResult[];
+	lademittelmahnung: TwoPassLademittelmahnungOutput[];
+	processingTimeMs: number;
+	success: boolean;
+	error?: string;
+}
+
+/**
+ * Configuration for two-pass extraction
+ */
+export interface TwoPassConfig {
+	classification: {
+		model: string;
+		temperature: number;
+		maxTokens: number;
+		confidenceThreshold: number;
+	};
+	extraction: {
+		model: string;
+		temperature: number;
+		maxTokens: number;
+	};
+	validation: {
+		autoCorrectSaldo: boolean;
+		autoCorrectExchangeStatus: boolean;
+		flagLowConfidence: boolean;
+		lowConfidenceThreshold: number;
+	};
+	output: {
+		saveClassifications: boolean;
+		saveRawExtraction: boolean;
+		outputDir: string;
+	};
 }

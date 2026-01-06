@@ -7,11 +7,52 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { env } from "./env.js";
-import { processDocumentGroup } from "./lib/document-grouper.js";
-import { extractDocumentGroup } from "./lib/extractor-v010.js";
-import { v010ToLademittelmahnungFormat } from "./lib/output-generator.js";
-import { validateAndEnrich } from "./lib/post-processor.js";
-import type { V010ExtractionData } from "./types/index.js";
+import { classifyPages, filterRelevantPages } from "./lib/classifier.js";
+import { getConfig, getConfigFromEnv } from "./lib/config.js";
+import { runExtractionPass } from "./lib/extractor-twopass.js";
+import { processPDF } from "./lib/pdf-processor.js";
+import { transformToLademittelmahnung } from "./lib/transform.js";
+import { validateExtraction } from "./lib/validation.js";
+import type { TwoPassExtractionResult } from "./types/index.js";
+
+function formatSummary(
+	extractions: TwoPassExtractionResult[],
+	processingTimeMs: number,
+	needsReviewCount: number,
+): string {
+	const lines: string[] = [];
+	const duration = (processingTimeMs / 1000).toFixed(2);
+
+	lines.push("=== Extraction Complete ===");
+	lines.push(`Duration: ${duration}s`);
+	lines.push(`Extractions: ${extractions.length}`);
+
+	if (needsReviewCount > 0) {
+		lines.push("");
+		lines.push(
+			`⚠️  ${needsReviewCount} extraction(s) flagged for manual review`,
+		);
+	}
+
+	for (const extraction of extractions) {
+		lines.push("");
+		lines.push(`Pallet Type: ${extraction.palletType}`);
+		lines.push(`  Pickup: ${extraction.pickup.location || "Unknown"}`);
+		lines.push(`    Date: ${extraction.pickup.date || "Unknown"}`);
+		lines.push(`    übernommen: ${extraction.pickup.übernommen}`);
+		lines.push(`  Delivery: ${extraction.delivery.location || "Unknown"}`);
+		lines.push(`    Date: ${extraction.delivery.date || "Unknown"}`);
+		lines.push(`    überlassen: ${extraction.delivery.überlassen}`);
+		lines.push(`    übernommen: ${extraction.delivery.übernommen}`);
+		lines.push(
+			`  Exchanged: ${extraction.exchangeStatus.exchanged ?? "Unknown"}`,
+		);
+		lines.push(`  Saldo: ${extraction.saldo}`);
+		lines.push(`  Confidence: ${(extraction.confidence * 100).toFixed(1)}%`);
+	}
+
+	return lines.join("\n");
+}
 
 const app = new Hono();
 
@@ -32,7 +73,12 @@ app.use("/process", async (c, next) => {
 });
 
 app.get("/health", (c) => {
-	return c.json({ status: "ok", model: env.OPENROUTER_MODEL });
+	const config = getConfig(getConfigFromEnv());
+	return c.json({
+		status: "ok",
+		classificationModel: config.classification.model,
+		extractionModel: config.extraction.model,
+	});
 });
 
 app.post("/process", async (c) => {
@@ -88,45 +134,95 @@ app.post("/process", async (c) => {
 			return c.json({ error: "No valid PDF files found" }, 400);
 		}
 
-		const prefix = `upload_${Date.now()}`;
-		const group = await processDocumentGroup(prefix, pdfPaths);
+		const config = getConfig(getConfigFromEnv());
 
-		const result = await extractDocumentGroup(group);
+		// Step 1: Process all PDFs and combine pages
+		const allPages = [];
+		let totalPdfPages = 0;
 
-		if (!result.success) {
+		for (const pdfPath of pdfPaths) {
+			const pdfResult = await processPDF(pdfPath);
+			allPages.push(...pdfResult.pages);
+			totalPdfPages += pdfResult.totalPages;
+		}
+
+		// Step 2: Classification pass
+		const classification = await classifyPages(allPages, config);
+
+		if (classification.relevantPages === 0) {
+			return c.json({
+				success: true,
+				processingTimeMs: Date.now() - startTime,
+				filesProcessed: pdfPaths.length,
+				pagesProcessed: totalPdfPages,
+				relevantPages: 0,
+				extractionsCount: 0,
+				needsReview: false,
+				classification: classification.pages,
+				extractions: [],
+				lademittelmahnung: [],
+				message: "No pallet-relevant documents found",
+			});
+		}
+
+		// Step 3: Filter to relevant pages
+		const { relevantPages, metadata } = filterRelevantPages(
+			allPages,
+			classification,
+		);
+
+		// Step 4: Extraction pass
+		const extractionResult = await runExtractionPass(
+			relevantPages,
+			metadata,
+			config,
+		);
+
+		if (!extractionResult.success) {
 			return c.json(
 				{
-					error: result.error || "Extraction failed",
+					error: extractionResult.error || "Extraction failed",
 					processingTimeMs: Date.now() - startTime,
+					classification: classification.pages,
 				},
 				500,
 			);
 		}
 
-		const enriched = validateAndEnrich(result);
+		// Step 5: Validate extractions
+		const validations = extractionResult.extractions.map((e) =>
+			validateExtraction(e, config),
+		);
+		const validatedExtractions = validations.map((v) => v.result);
 
-		const extractions = Array.isArray(enriched.data)
-			? enriched.data
-			: enriched.data
-				? [enriched.data]
-				: [];
-
-		const validExtractions = extractions.filter(
-			(e): e is V010ExtractionData => e !== undefined,
+		// Step 6: Transform to Lademittelmahnung format
+		const lademittelmahnungResults = validatedExtractions.map((extraction, i) =>
+			transformToLademittelmahnung(extraction, validations[i], config),
 		);
 
-		const lademittelmahnungResults = validExtractions.map(
-			v010ToLademittelmahnungFormat,
+		const needsReviewCount = lademittelmahnungResults.filter(
+			(r) => r.needsReview,
+		).length;
+
+		const processingTimeMs = Date.now() - startTime;
+		const summary = formatSummary(
+			validatedExtractions,
+			processingTimeMs,
+			needsReviewCount,
 		);
 
 		return c.json({
 			success: true,
-			processingTimeMs: Date.now() - startTime,
+			processingTimeMs,
 			filesProcessed: pdfPaths.length,
-			pagesProcessed: group.pages.length,
-			extractionsCount: validExtractions.length,
-			needsReview: enriched.needsReview,
-			extractions: validExtractions,
+			pagesProcessed: totalPdfPages,
+			relevantPages: classification.relevantPages,
+			extractionsCount: validatedExtractions.length,
+			needsReview: needsReviewCount > 0,
+			needsReviewCount,
+			summary,
+			classification: classification.pages,
+			extractions: validatedExtractions,
 			lademittelmahnung: lademittelmahnungResults,
 		});
 	} catch (error) {
@@ -152,11 +248,11 @@ app.post("/process", async (c) => {
 });
 
 const port = env.PORT;
+const config = getConfig(getConfigFromEnv());
+
 console.log(`Starting server on port ${port}...`);
-console.log(`Model: ${env.OPENROUTER_MODEL}`);
-console.log(
-	`Custom prompt: ${env.EXTRACTION_PROMPT_BASE64 ? "Yes (base64)" : "No (using default)"}`,
-);
+console.log(`Classification model: ${config.classification.model}`);
+console.log(`Extraction model: ${config.extraction.model}`);
 
 serve({
 	fetch: app.fetch,

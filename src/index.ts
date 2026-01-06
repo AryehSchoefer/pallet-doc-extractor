@@ -2,14 +2,17 @@
 import "dotenv/config";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { processDocumentGroup } from "./lib/document-grouper.js";
-import { extractDocumentGroup } from "./lib/extractor-v010.js";
-import {
-	saveAsJSON,
-	v010ToLademittelmahnungFormat,
-} from "./lib/output-generator.js";
-import { validateAndEnrich } from "./lib/post-processor.js";
-import type { V010ExtractionData } from "./types/index.js";
+import { classifyPages, filterRelevantPages } from "./lib/classifier.js";
+import { getConfig, getConfigFromEnv } from "./lib/config.js";
+import { runExtractionPass } from "./lib/extractor-twopass.js";
+import { saveAsJSON } from "./lib/output-generator.js";
+import { processPDF } from "./lib/pdf-processor.js";
+import { transformToLademittelmahnung } from "./lib/transform.js";
+import { validateExtraction } from "./lib/validation.js";
+import type {
+	TwoPassLademittelmahnungOutput,
+	TwoPassProcessingResult,
+} from "./types/index.js";
 
 function parseArgs(): { input: string; output: string } {
 	const args = process.argv.slice(2);
@@ -61,43 +64,141 @@ async function main(): Promise<void> {
 
 	await fs.mkdir(outputDir, { recursive: true });
 
-	console.log(`\n=== Pallet Movement Extraction (v0.10) ===`);
+	const config = getConfig(getConfigFromEnv());
+
+	console.log(`\n=== Two-Pass Pallet Extraction ===`);
 	console.log(`Input:  ${input}`);
 	console.log(`Output: ${outputDir}/`);
 	console.log();
 
+	const result: TwoPassProcessingResult = {
+		classification: {
+			pages: [],
+			relevantPageNumbers: [],
+			documentTypesFound: [],
+			totalPages: 0,
+			relevantPages: 0,
+		},
+		extractions: [],
+		lademittelmahnung: [],
+		processingTimeMs: 0,
+		success: false,
+	};
+
 	try {
-		console.log("Step 1: Processing PDF and grouping pages...");
-		const group = await processDocumentGroup(basename, [input]);
-		console.log(`  Processed ${group.pages.length} pages`);
+		// Step 1: Process PDF to images
+		console.log("Step 1: Processing PDF...");
+		const pdfResult = await processPDF(input);
+		console.log(`  Total pages: ${pdfResult.totalPages}`);
 
-		console.log("\nStep 2: Extracting data (single-pass)...");
-		const result = await extractDocumentGroup(group);
+		// Step 2: Classification pass
+		console.log("\nStep 2: Classifying pages...");
+		const classification = await classifyPages(pdfResult.pages, config);
+		result.classification = classification;
 
-		if (!result.success) {
-			throw new Error(result.error || "Extraction failed");
+		console.log(
+			`  Relevant pages: ${classification.relevantPages}/${classification.totalPages}`,
+		);
+
+		for (const pageClass of classification.pages) {
+			const status = pageClass.isRelevant ? "✓" : "✗";
+			console.log(
+				`    Page ${pageClass.pageNumber}: ${status} ${pageClass.documentType} (${(pageClass.confidence * 100).toFixed(0)}%)`,
+			);
 		}
 
-		console.log("\nStep 3: Validating and enriching...");
-		const enriched = validateAndEnrich(result);
+		// Step 3: Filter to relevant pages
+		if (classification.relevantPages === 0) {
+			console.log("\n⚠️  No pallet-relevant documents found");
+			result.error = "No pallet-relevant documents found in PDF";
 
-		const extractions = Array.isArray(enriched.data)
-			? enriched.data
-			: [enriched.data];
-		const validExtractions = extractions.filter(
-			(e): e is V010ExtractionData => e !== undefined,
+			if (config.output.saveClassifications) {
+				const classificationPath = outputFile.replace(
+					".json",
+					"_classification.json",
+				);
+				await saveAsJSON(classification, classificationPath);
+			}
+
+			console.log(`\nClassification saved to: ${outputDir}/`);
+			process.exit(0);
+		}
+
+		const { relevantPages, metadata } = filterRelevantPages(
+			pdfResult.pages,
+			classification,
 		);
 
-		console.log("\nStep 4: Converting to Lademittelmahnung format...");
-		const lademittelmahnungResults = validExtractions.map(
-			v010ToLademittelmahnungFormat,
+		// Step 4: Extraction pass
+		console.log("\nStep 3: Extracting pallet data...");
+		const extractionResult = await runExtractionPass(
+			relevantPages,
+			metadata,
+			config,
 		);
 
-		console.log("\nStep 5: Saving results...");
+		if (!extractionResult.success) {
+			throw new Error(extractionResult.error || "Extraction failed");
+		}
 
-		const extractionPath = outputFile.replace(".json", "_extraction.json");
-		await saveAsJSON(validExtractions, extractionPath);
+		result.extractions = extractionResult.extractions;
 
+		// Step 5: Validate
+		console.log("\nStep 4: Validating...");
+		const validations = result.extractions.map((e) =>
+			validateExtraction(e, config),
+		);
+
+		for (const validation of validations) {
+			if (validation.errors.length > 0) {
+				console.warn(
+					"  Validation errors (auto-corrected):",
+					validation.errors,
+				);
+			}
+			if (validation.warnings.length > 0) {
+				console.warn("  Warnings:", validation.warnings);
+			}
+		}
+
+		const validatedExtractions = validations.map((v) => v.result);
+
+		// Step 6: Transform to output format
+		console.log("\nStep 5: Generating Lademittelmahnung...");
+		const lademittelmahnungResults: TwoPassLademittelmahnungOutput[] = [];
+
+		for (let i = 0; i < validatedExtractions.length; i++) {
+			const lmOutput = transformToLademittelmahnung(
+				validatedExtractions[i],
+				validations[i],
+				config,
+			);
+			lademittelmahnungResults.push(lmOutput);
+		}
+
+		result.lademittelmahnung = lademittelmahnungResults;
+		result.success = true;
+		result.processingTimeMs = Date.now() - startTime;
+
+		// Step 7: Save results
+		console.log("\nStep 6: Saving results...");
+
+		// Save classification
+		if (config.output.saveClassifications) {
+			const classificationPath = outputFile.replace(
+				".json",
+				"_classification.json",
+			);
+			await saveAsJSON(classification, classificationPath);
+		}
+
+		// Save raw extraction
+		if (config.output.saveRawExtraction) {
+			const extractionPath = outputFile.replace(".json", "_extraction.json");
+			await saveAsJSON(validatedExtractions, extractionPath);
+		}
+
+		// Save Lademittelmahnung output
 		if (lademittelmahnungResults.length > 0) {
 			await saveAsJSON(lademittelmahnungResults, outputFile);
 		}
@@ -105,46 +206,50 @@ async function main(): Promise<void> {
 		const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 		console.log(`\n=== Extraction Complete ===`);
 		console.log(`Duration: ${duration}s`);
-		console.log(`Extractions: ${validExtractions.length}`);
+		console.log(`Extractions: ${validatedExtractions.length}`);
 
-		if (enriched.needsReview) {
+		const needsReviewCount = lademittelmahnungResults.filter(
+			(r) => r.needsReview,
+		).length;
+		if (needsReviewCount > 0) {
 			console.log(
-				`\nNOTE: Results flagged for manual review (low confidence or issues detected)`,
+				`\n⚠️  ${needsReviewCount} extraction(s) flagged for manual review`,
 			);
 		}
 
-		for (const extraction of validExtractions) {
+		for (const extraction of validatedExtractions) {
+			console.log(`\nPallet Type: ${extraction.palletType}`);
+			console.log(`  Pickup: ${extraction.pickup.location || "Unknown"}`);
+			console.log(`    Date: ${extraction.pickup.date || "Unknown"}`);
+			console.log(`    übernommen: ${extraction.pickup.übernommen}`);
+			console.log(`  Delivery: ${extraction.delivery.location || "Unknown"}`);
+			console.log(`    Date: ${extraction.delivery.date || "Unknown"}`);
+			console.log(`    überlassen: ${extraction.delivery.überlassen}`);
+			console.log(`    übernommen: ${extraction.delivery.übernommen}`);
 			console.log(
-				`\nDocument: ${extraction.documentType} (${extraction.locationType})`,
+				`  Exchanged: ${extraction.exchangeStatus.exchanged ?? "Unknown"}`,
 			);
-			console.log(`  Location: ${extraction.location.name || "Unknown"}`);
-			console.log(`  Date: ${extraction.date || "Unknown"}`);
+			console.log(`  Saldo: ${extraction.saldo}`);
 			console.log(`  Confidence: ${(extraction.confidence * 100).toFixed(1)}%`);
-
-			if (extraction.palletsGiven.length > 0) {
-				console.log(`  Pallets Given:`);
-				for (const m of extraction.palletsGiven) {
-					console.log(`    ${m.type}: ${m.qty}`);
-				}
-			}
-
-			if (extraction.palletsReceived.length > 0) {
-				console.log(`  Pallets Received:`);
-				for (const m of extraction.palletsReceived) {
-					console.log(`    ${m.type}: ${m.qty}`);
-				}
-			}
-
-			console.log(`  Exchanged: ${extraction.exchanged ?? "Unknown"}`);
-			console.log(`  Saldo: ${extraction.saldo ?? "N/A"}`);
 		}
 
-		console.log(`\nRaw extraction saved to: ${extractionPath}`);
-		if (lademittelmahnungResults.length > 0) {
-			console.log(`Condensed results saved to: ${outputFile}`);
-		}
+		console.log(`\nResults saved to: ${outputDir}/`);
 	} catch (error) {
 		console.error("\nError during extraction:", error);
+		result.error = error instanceof Error ? error.message : String(error);
+		result.success = false;
+		result.processingTimeMs = Date.now() - startTime;
+
+		const errorPath = path.join(outputDir, `${basename}_error.json`);
+		await saveAsJSON(
+			{
+				error: result.error,
+				classification: result.classification,
+				timestamp: new Date().toISOString(),
+			},
+			errorPath,
+		);
+
 		process.exit(1);
 	}
 }
