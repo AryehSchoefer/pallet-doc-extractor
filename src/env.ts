@@ -6,6 +6,7 @@ export const env = createEnv({
 	server: {
 		OPENROUTER_API_KEY: z.string().min(1),
 		OPENROUTER_MODEL: z.string().default("google/gemini-2.5-pro"),
+		CLASSIFICATION_PROMPT_BASE64: z.string().optional(),
 		EXTRACTION_PROMPT_BASE64: z.string().optional(),
 		PORT: z.coerce.number().default(3000),
 		API_KEY: z.string().min(1),
